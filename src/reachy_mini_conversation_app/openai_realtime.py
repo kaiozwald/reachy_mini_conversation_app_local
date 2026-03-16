@@ -18,6 +18,8 @@ from scipy.signal import resample
 from websockets.exceptions import ConnectionClosedError
 from gradio_client import Client as GradioClient
 
+from reachy_mini_conversation_app.local_audio import GroqASR, GroqTTS
+
 from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.prompts import get_session_voice, get_session_instructions
 from reachy_mini_conversation_app.tools.core_tools import (
@@ -97,6 +99,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         # Built-in Local ASR (Distil-Whisper - lightweight for edge)
         self._local_asr: LocalASR | None = None
 
+        
         if config.FULL_LOCAL_MODE:
             self._local_asr = LocalASR(
                 model_name=config.DISTIL_WHISPER_MODEL,
@@ -116,6 +119,24 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             )
             logger.info("Built-in TTS initialized: Kokoro via FastRTC (voice: %s)", config.KOKORO_VOICE)
 
+        if config.STT_PROVIDER == "groq":
+            self._local_asr = GroqASR(
+                api_key=config.GROQ_API_KEY,
+                model=config.GROQ_STT_MODEL,
+                language=config.WHISPER_LANGUAGE,
+            )
+        elif config.FULL_LOCAL_MODE:
+            self._local_asr = LocalASR(...)
+
+        if config.TTS_PROVIDER == "groq":
+            self._local_tts = GroqTTS(
+                api_key=config.GROQ_API_KEY,
+                model=config.GROQ_TTS_MODEL,
+                voice=config.GROQ_TTS_VOICE,
+                output_sample_rate=self.output_sample_rate,
+            )
+        elif config.FULL_LOCAL_MODE:
+            self._local_tts = LocalTTS(...)
         # =====================================================================
         # LOCAL LLM CLIENT (LM Studio, Ollama, or vLLM)
         # =====================================================================

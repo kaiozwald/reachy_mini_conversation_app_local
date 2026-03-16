@@ -398,7 +398,74 @@ class LocalTTS:
             logger.error("Kokoro TTS synthesis error: %s", e)
             return None
 
+class GroqASR:
+    """Groq-hosted Whisper speech-to-text."""
 
+    def __init__(self, api_key: str, model: str = "whisper-large-v3-turbo", language: str = "en"):
+        from groq import AsyncGroq
+        self._client = AsyncGroq(api_key=api_key)
+        self._model = model
+        self._language = language
+
+    async def transcribe(self, audio_data: bytes, sample_rate: int) -> str | None:
+        import tempfile, wave, os
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            temp_path = f.name
+            with wave.open(f, "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(sample_rate)
+                wav.writeframes(audio_data)
+        try:
+            with open(temp_path, "rb") as audio_file:
+                response = await self._client.audio.transcriptions.create(
+                    model=self._model,
+                    file=audio_file,
+                    language=self._language,
+                )
+            return response.text.strip() or None
+        except Exception as e:
+            logger.error("Groq STT failed: %s", e)
+            return None
+        finally:
+            os.unlink(temp_path)
+
+
+class GroqTTS:
+    """Groq-hosted Orpheus text-to-speech."""
+
+    def __init__(self, api_key: str, model: str = "canopylabs/orpheus-v1-english",
+                 voice: str = "tara", output_sample_rate: int = 24000):
+        from groq import AsyncGroq
+        self._client = AsyncGroq(api_key=api_key)
+        self._model = model
+        self._voice = voice
+        self._output_sample_rate = output_sample_rate
+
+    async def synthesize(self, text: str) -> np.ndarray | None:
+        try:
+            response = await self._client.audio.speech.create(
+                model=self._model,
+                voice=self._voice,
+                input=text,
+                response_format="wav",
+            )
+            import io, wave
+            audio_bytes = response.content
+            with wave.open(io.BytesIO(audio_bytes)) as wav:
+                frames = wav.readframes(wav.getnframes())
+                src_rate = wav.getframerate()
+            audio_data = np.frombuffer(frames, dtype=np.int16)
+            # resample to 24kHz if needed (Groq TTS outputs 48kHz)
+            if src_rate != self._output_sample_rate:
+                from scipy.signal import resample
+                num_samples = int(len(audio_data) * self._output_sample_rate / src_rate)
+                audio_data = resample(audio_data, num_samples).astype(np.int16)
+            return audio_data
+        except Exception as e:
+            logger.error("Groq TTS failed: %s", e)
+            return None
+            
 # Convenience function to check local audio capabilities
 def check_local_audio_support() -> dict[str, bool]:
     """Check which local audio components are available.

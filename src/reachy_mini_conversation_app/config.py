@@ -97,12 +97,12 @@ class Config:
     # =========================================================================
     # LOCAL TTS CONFIGURATION (Text-to-Speech - Kokoro via FastRTC)
     # =========================================================================
-    # Kokoro settings (lightweight, 82M parameters, via FastRTC)
-    KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_sarah")  # Voice selection
-    KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.0"))  # Speech speed (0.5-2.0)
-
-    logger.info(f"Local TTS: Kokoro via FastRTC (voice: {KOKORO_VOICE}, speed: {KOKORO_SPEED})")
-
+    STT_PROVIDER = os.getenv("STT_PROVIDER", "local")
+    TTS_PROVIDER = os.getenv("TTS_PROVIDER", "local")
+    GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "")
+    GROQ_STT_MODEL   = os.getenv("GROQ_STT_MODEL", "whisper-large-v3-turbo")
+    GROQ_TTS_MODEL   = os.getenv("GROQ_TTS_MODEL", "canopylabs/orpheus-v1-english")
+    GROQ_TTS_VOICE   = os.getenv("GROQ_TTS_VOICE", "tara")
     # =========================================================================
     # LOCAL VAD CONFIGURATION (Voice Activity Detection)
     # =========================================================================
