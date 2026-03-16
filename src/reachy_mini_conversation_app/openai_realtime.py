@@ -130,7 +130,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                 # Both LM Studio and Ollama use OpenAI-compatible APIs
                 self._local_llm_client = AsyncOpenAI(
                     base_url=config.LOCAL_LLM_ENDPOINT,
-                    api_key="not-needed",  # Local LLMs don't require API key
+                    api_key=config.OLLAMA_API_KEY or "not-needed",
                 )
                 provider_name = config.LLM_PROVIDER.upper() if config.LLM_PROVIDER else "Local LLM"
                 logger.info("%s client initialized at %s with model %s",

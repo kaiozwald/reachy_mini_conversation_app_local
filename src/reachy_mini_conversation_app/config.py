@@ -56,10 +56,12 @@ class Config:
     OLLAMA_ENDPOINT = os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434/v1")
     # Default to phi-3-mini for Jetson (3.8B params, ~2GB RAM)
     OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi-3-mini-4k-instruct" if JETSON_OPTIMIZE else "")
-
+    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi-3-mini-4k-instruct" if JETSON_OPTIMIZE else "")
     # Resolve LOCAL_LLM_ENDPOINT and LOCAL_LLM_MODEL based on provider selection
     LOCAL_LLM_ENDPOINT: str | None = None
     LOCAL_LLM_MODEL: str = ""
+    
+    OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 
     if LLM_PROVIDER == "lmstudio":
         LOCAL_LLM_ENDPOINT = LMSTUDIO_ENDPOINT
