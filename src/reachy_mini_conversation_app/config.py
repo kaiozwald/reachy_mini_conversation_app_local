@@ -23,7 +23,8 @@ class Config:
     # =========================================================================
     # FULL LOCAL MODE (ALWAYS ENABLED - No cloud dependencies)
     # =========================================================================
-    FULL_LOCAL_MODE = True  # Hardcoded for fully local operation
+    FULL_LOCAL_MODE = os.getenv("FULL_LOCAL_MODE", "true").lower().strip() in ("true", "1", "yes")  # Hardcoded for fully local operation
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "not-needed")
 
     # =========================================================================
     # JETSON OPTIMIZATION

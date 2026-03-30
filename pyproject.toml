@@ -10,29 +10,16 @@ description = ""
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    #Media
-    "aiortc>=1.13.0",
     "fastrtc>=0.0.34",
-    "gradio==5.50.1.dev1",
-    "huggingface_hub>=0.34.4",
-    "opencv-python>=4.12.0.88",
-
-    #Environment variables
+    "aiortc>=1.13.0",
     "python-dotenv",
-
-    #Reachy mini
     "reachy_mini_dances_library",
     "reachy_mini_toolbox",
     "reachy_mini>=1.2.3rc1",
     "eclipse-zenoh~=1.7.0",
     "gradio_client>=1.13.3",
-
-    #Local Audio (Always included for fully local operation)
-    "distil-whisper-fastrtc",
-    "torch",
-    "transformers",
-    "accelerate",
     "scipy",
+    "groq",
 ]
 
 [project.optional-dependencies]

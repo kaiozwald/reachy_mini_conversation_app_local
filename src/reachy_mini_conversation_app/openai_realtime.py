@@ -6,7 +6,7 @@ import logging
 from typing import Any, Final, Tuple, Literal, Optional
 from pathlib import Path
 from datetime import datetime
-
+import os
 import cv2
 import aiohttp
 import numpy as np
@@ -34,7 +34,6 @@ logger = logging.getLogger(__name__)
 
 OPEN_AI_INPUT_SAMPLE_RATE: Final[Literal[24000]] = 24000
 OPEN_AI_OUTPUT_SAMPLE_RATE: Final[Literal[24000]] = 24000
-
 
 class OpenaiRealtimeHandler(AsyncStreamHandler):
     """An OpenAI realtime handler for fastrtc Stream."""
@@ -90,7 +89,8 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         self._audio_buffer: list[bytes] = []  # Buffer for audio during speech
         self._is_speech_active: bool = False
         self._vad_processing: bool = False  # Prevent concurrent processing
-
+        self._tts_playing: bool = False
+        
         # External VAD endpoint (optional - for smart turn detection)
         self._local_vad_endpoint: str | None = config.LOCAL_VAD_ENDPOINT
         if self._local_vad_endpoint:
@@ -137,6 +137,9 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             )
         elif config.FULL_LOCAL_MODE:
             self._local_tts = LocalTTS(...)
+
+        KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_sarah")
+        KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.0"))
         # =====================================================================
         # LOCAL LLM CLIENT (LM Studio, Ollama, or vLLM)
         # =====================================================================
@@ -346,7 +349,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                 await self.output_queue.put(
                     (self.output_sample_rate, chunk.reshape(1, -1)),
                 )
-
+            self._tts_playing = False
             logger.debug("TTS sentence complete: %s", text[:30])
 
         except Exception as e:
@@ -545,19 +548,43 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
             logger.debug("Calling local LLM with %d messages", len(messages))
 
-            # Call local LLM (no tool support - using base instruct model)
+            # Call local LLM (no tool support - using base instruct model
             response = await self._local_llm_client.chat.completions.create(
                 model=self._local_llm_model,
                 messages=messages,
                 max_tokens=512,
                 temperature=0.7,
+                tools=get_tool_specs() or None,
+                tool_choice="auto" if get_tool_specs() else None,
             )
-
+            
             choice = response.choices[0]
             assistant_message = choice.message
 
+            # Handle tool calls if present
+            if assistant_message.tool_calls:
+                for tool_call in assistant_message.tool_calls:
+                    tool_name = tool_call.function.name
+                    tool_args = tool_call.function.arguments
+                    logger.info("Tool call: %s args=%s", tool_name, tool_args)
+                    try:
+                        tool_result = await dispatch_tool_call(tool_name, tool_args, self.deps)
+                        logger.info("Tool result: %s", tool_result)
+                        await self.output_queue.put(
+                            AdditionalOutputs({
+                                "role": "assistant",
+                                "content": f"[tool: {tool_name}]",
+                                "metadata": {"title": f"Used tool {tool_name}", "status": "done"},
+                            })
+                        )
+                    except Exception as e:
+                        logger.error("Tool '%s' failed: %s", tool_name, e)
+                return
+
             # Get the text content
             text_response = assistant_message.content
+
+            # Get the text content
             if text_response:
                 # Clean up thinking tags from various models (Qwen, DeepSeek, etc.)
                 import re
@@ -599,6 +626,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         # Use built-in local TTS (Kokoro via FastRTC)
         if self._local_tts:
             try:
+                self._tts_playing = True
                 audio_data = await self._local_tts.synthesize(text)
                 if audio_data is not None:
                     # Feed to head wobbler if available
@@ -1171,6 +1199,8 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         # Full local mode: use built-in VAD + ASR + LLM + TTS
         if self._is_full_local_mode:
             # Process with built-in VAD
+            if self._tts_playing:
+                return
             speech_started, speech_ended = self._local_vad.process(audio_frame)
 
             if speech_started:

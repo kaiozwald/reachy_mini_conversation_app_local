@@ -451,7 +451,7 @@ class GroqTTS:
                 response_format="wav",
             )
             import io, wave
-            audio_bytes = response.content
+            audio_bytes = await response.read()
             with wave.open(io.BytesIO(audio_bytes)) as wav:
                 frames = wav.readframes(wav.getnframes())
                 src_rate = wav.getframerate()
