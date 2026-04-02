@@ -58,6 +58,10 @@ class Config:
     # Default to phi-3-mini for Jetson (3.8B params, ~2GB RAM)
     OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi-3-mini-4k-instruct" if JETSON_OPTIMIZE else "")
     OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi-3-mini-4k-instruct" if JETSON_OPTIMIZE else "")
+
+    # Stuart AI configuration (custom HTTP endpoint)
+    STUART_ENDPOINT = os.getenv("STUART_ENDPOINT", "http://52.214.229.167:9871/stuart-reachy")
+
     # Resolve LOCAL_LLM_ENDPOINT and LOCAL_LLM_MODEL based on provider selection
     LOCAL_LLM_ENDPOINT: str | None = None
     LOCAL_LLM_MODEL: str = ""
@@ -72,8 +76,12 @@ class Config:
         LOCAL_LLM_ENDPOINT = OLLAMA_ENDPOINT
         LOCAL_LLM_MODEL = OLLAMA_MODEL or "llama3"
         logger.info(f"Ollama enabled at {LOCAL_LLM_ENDPOINT} with model {LOCAL_LLM_MODEL}")
+    elif LLM_PROVIDER == "stuart":
+        # Stuart uses its own HTTP endpoint, not OpenAI-compatible
+        # LOCAL_LLM_ENDPOINT stays None — Stuart handler is separate
+        logger.info(f"Stuart AI enabled at {STUART_ENDPOINT}")
     elif LLM_PROVIDER:
-        logger.warning(f"Unknown LLM_PROVIDER '{LLM_PROVIDER}'. Valid options: 'lmstudio', 'ollama'")
+        logger.warning(f"Unknown LLM_PROVIDER '{LLM_PROVIDER}'. Valid options: 'lmstudio', 'ollama', 'stuart'")
 
     # Legacy support: allow direct LOCAL_LLM_ENDPOINT override
     _legacy_endpoint = os.getenv("LOCAL_LLM_ENDPOINT")

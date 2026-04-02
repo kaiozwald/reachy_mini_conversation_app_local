@@ -149,6 +149,14 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         self._conversation_history: list[dict[str, Any]] = []
         self._pending_response_id: str | None = None  # Track OpenAI response to cancel
 
+        # =====================================================================
+        # STUART AI CLIENT (custom HTTP endpoint)
+        # =====================================================================
+        self._stuart_endpoint: str | None = None
+        if config.LLM_PROVIDER == "stuart":
+            self._stuart_endpoint = config.STUART_ENDPOINT
+            logger.info("Stuart AI client initialized at %s", self._stuart_endpoint)
+
         if config.LOCAL_LLM_ENDPOINT:
             try:
                 # Both LM Studio and Ollama use OpenAI-compatible APIs
@@ -166,7 +174,10 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         # Log if full local mode is enabled
         if self._is_full_local_mode:
             logger.info("=" * 60)
-            logger.info("FULL LOCAL MODE: No OpenAI connection required")
+            if self._stuart_endpoint:
+                logger.info("FULL LOCAL MODE: Using Stuart AI at %s", self._stuart_endpoint)
+            else:
+                logger.info("FULL LOCAL MODE: No OpenAI connection required")
             logger.info("=" * 60)
 
     @property
@@ -519,11 +530,13 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         # Show transcription in UI
         await self.output_queue.put(AdditionalOutputs({"role": "user", "content": transcript}))
 
-        # Generate response with local LLM
-        if self._local_llm_client:
+        # Generate response with configured LLM provider
+        if self._stuart_endpoint:
+            await self._generate_stuart_response(transcript)
+        elif self._local_llm_client:
             await self._generate_local_response(transcript)
         else:
-            logger.warning("Local LLM not available, cannot generate response")
+            logger.warning("No LLM provider available, cannot generate response")
 
     async def _generate_local_response(self, user_message: str) -> None:
         """Generate a response using the local LLM and send to Chatterbox.
@@ -612,6 +625,82 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             logger.error("Local LLM generation failed: %s", e)
             await self.output_queue.put(
                 AdditionalOutputs({"role": "assistant", "content": f"[error] LLM failed: {e}"})
+            )
+
+    async def _generate_stuart_response(self, user_message: str) -> None:
+        """Generate a response using the Stuart AI HTTP endpoint.
+
+        Sends the user's message as a form-data POST to the Stuart endpoint
+        and reads the 'manswer' field from the JSON response.
+
+        Args:
+            user_message: The user's transcribed message.
+        """
+        if not self._stuart_endpoint:
+            logger.warning("Stuart AI endpoint not configured")
+            return
+
+        try:
+            logger.info("Stuart AI request: %s", user_message[:100])
+
+            # Send POST with form data to Stuart endpoint
+            async with aiohttp.ClientSession() as session:
+                form_data = aiohttp.FormData()
+                form_data.add_field("question", user_message)
+
+                async with session.post(
+                    self._stuart_endpoint,
+                    data=form_data,
+                    timeout=aiohttp.ClientTimeout(total=60.0),
+                ) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        logger.error("Stuart AI request failed (HTTP %d): %s", resp.status, error_text[:200])
+                        await self.output_queue.put(
+                            AdditionalOutputs({"role": "assistant", "content": f"[error] Stuart AI returned HTTP {resp.status}"})
+                        )
+                        return
+
+                    result = await resp.json()
+
+            # Extract the answer from the 'manswer' field
+            text_response = result.get("manswer", "")
+
+            if not text_response or not text_response.strip():
+                logger.warning("Stuart AI returned empty response")
+                return
+
+            # Clean up markdown formatting from the response
+            import re
+            # Remove markdown bold/italic
+            text_response = re.sub(r'\*+', '', text_response)
+            # Remove markdown headers
+            text_response = re.sub(r'^#+\s*', '', text_response, flags=re.MULTILINE)
+            text_response = text_response.strip()
+
+            logger.info("Stuart AI response: %s", text_response[:100])
+
+            # Add to conversation history
+            self._conversation_history.append({"role": "user", "content": user_message})
+            self._conversation_history.append({"role": "assistant", "content": text_response})
+
+            # Show in UI
+            await self.output_queue.put(
+                AdditionalOutputs({"role": "assistant", "content": text_response})
+            )
+
+            # Synthesize with local TTS
+            await self._synthesize_locally(text_response)
+
+        except asyncio.TimeoutError:
+            logger.error("Stuart AI request timed out")
+            await self.output_queue.put(
+                AdditionalOutputs({"role": "assistant", "content": "[error] Stuart AI request timed out"})
+            )
+        except Exception as e:
+            logger.error("Stuart AI generation failed: %s", e)
+            await self.output_queue.put(
+                AdditionalOutputs({"role": "assistant", "content": f"[error] Stuart AI failed: {e}"})
             )
 
     async def _synthesize_locally(self, text: str) -> None:
@@ -1255,11 +1344,13 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             # Show transcription in UI
             await self.output_queue.put(AdditionalOutputs({"role": "user", "content": transcript}))
 
-            # Generate response with local LLM
-            if self._local_llm_client:
+            # Generate response with configured LLM provider
+            if self._stuart_endpoint:
+                await self._generate_stuart_response(transcript)
+            elif self._local_llm_client:
                 await self._generate_local_response(transcript)
             else:
-                logger.warning("Local LLM not available, cannot generate response")
+                logger.warning("No LLM provider available, cannot generate response")
 
         finally:
             self._vad_processing = False
