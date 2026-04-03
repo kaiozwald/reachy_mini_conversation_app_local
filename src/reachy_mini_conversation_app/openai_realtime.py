@@ -98,6 +98,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
         # Built-in Local ASR (Distil-Whisper - lightweight for edge)
         self._local_asr: LocalASR | None = None
+        self._frame_count: int = 0
 
         
         if config.FULL_LOCAL_MODE:
@@ -184,7 +185,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
     def _is_full_local_mode(self) -> bool:
         """Check if we're in full local mode (no data sent to OpenAI)."""
         # Always True - fully local operation only
-        return True
+        return config.FULL_LOCAL_MODE or config.LLM_PROVIDER == "stuart"
 
     def copy(self) -> "OpenaiRealtimeHandler":
         """Create a copy of the handler."""
@@ -1285,6 +1286,13 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         # Cast if needed
         audio_frame = audio_to_int16(audio_frame)
 
+        # Heartbeat: Log energy level every 50 frames to help tune VAD
+        self._frame_count += 1
+        if self._frame_count % 50 == 0:
+            audio_float = audio_frame.astype(np.float32) / 32768.0
+            rms = np.sqrt(np.mean(audio_float ** 2))
+            logger.info(f"Mic Energy Level: {rms:.5f} (Threshold: {config.VAD_ENERGY_THRESHOLD})")
+
         # Full local mode: use built-in VAD + ASR + LLM + TTS
         if self._is_full_local_mode:
             # Process with built-in VAD
@@ -1337,7 +1345,9 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         try:
             # Transcribe with local ASR
             transcript = await self._transcribe_with_local_asr(audio_data)
-            if not transcript:
+            if transcript:
+                logger.info(f"ASR Transcript: {transcript}")
+            else:
                 logger.warning("ASR returned no transcription")
                 return
 
