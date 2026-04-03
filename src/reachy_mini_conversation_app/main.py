@@ -43,7 +43,7 @@ def run(
     """Run the Reachy Mini conversation app."""
     from reachy_mini_conversation_app.moves import MovementManager
     from reachy_mini_conversation_app.console import LocalStream
-    from reachy_mini_conversation_app_local.src.reachy_mini_conversation_app.stuart_realtime import StuartRealtimeHandler
+    from reachy_mini_conversation_app.stuart_realtime import StuartRealtimeHandler
     from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
     from reachy_mini_conversation_app.audio.head_wobbler import HeadWobbler
 
