@@ -68,7 +68,9 @@ class Config:
     LOCAL_LLM_MODEL: str = ""
     
     OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
-
+    # Stuart AI configuration
+    STUART_ENDPOINT = os.getenv("STUART_ENDPOINT", "")
+    
     if LLM_PROVIDER == "lmstudio":
         LOCAL_LLM_ENDPOINT = LMSTUDIO_ENDPOINT
         LOCAL_LLM_MODEL = LMSTUDIO_MODEL or "local-model"
@@ -78,8 +80,6 @@ class Config:
         LOCAL_LLM_MODEL = OLLAMA_MODEL or "llama3"
         logger.info(f"Ollama enabled at {LOCAL_LLM_ENDPOINT} with model {LOCAL_LLM_MODEL}")
     elif LLM_PROVIDER == "stuart":
-        # Stuart uses its own HTTP endpoint, not OpenAI-compatible
-        # LOCAL_LLM_ENDPOINT stays None — Stuart handler is separate
         logger.info(f"Stuart AI enabled at {STUART_ENDPOINT}")
     elif LLM_PROVIDER:
         logger.warning(f"Unknown LLM_PROVIDER '{LLM_PROVIDER}'. Valid options: 'lmstudio', 'ollama', 'stuart'")
