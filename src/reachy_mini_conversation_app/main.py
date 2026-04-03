@@ -41,10 +41,9 @@ def run(
     instance_path: Optional[str] = None,
 ) -> None:
     """Run the Reachy Mini conversation app."""
-    # Putting these dependencies here makes the dashboard faster to load when the conversation app is installed
     from reachy_mini_conversation_app.moves import MovementManager
     from reachy_mini_conversation_app.console import LocalStream
-    from reachy_mini_conversation_app.openai_realtime import OpenaiRealtimeHandler
+    from reachy_mini_conversation_app_local.src.reachy_mini_conversation_app.stuart_realtime import StuartRealtimeHandler
     from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
     from reachy_mini_conversation_app.audio.head_wobbler import HeadWobbler
 
@@ -55,14 +54,6 @@ def run(
         logger.warning("Head tracking is not activated due to --no-camera.")
 
     if robot is None:
-        # Initialize robot with appropriate backend
-        # TODO: Implement dynamic robot connection detection
-        # Automatically detect and connect to available Reachy Mini robot(s!)
-        # Priority checks (in order):
-        #   1. Reachy Lite connected directly to the host
-        #   2. Reachy Mini daemon running on localhost (same device)
-        #   3. Reachy Mini daemon on local network (same subnet)
-
         if args.wireless_version and not args.on_device:
             logger.info("Using WebRTC backend for fully remote wireless version")
             robot = ReachyMini(media_backend="webrtc", localhost_only=False)
@@ -73,10 +64,9 @@ def run(
             logger.info("Using default backend for lite version")
             robot = ReachyMini(media_backend="default")
 
-    # Check if running in simulation mode without --gradio
     if robot.client.get_status()["simulation_enabled"] and not args.gradio:
         logger.error(
-            "Simulation mode requires Gradio interface. Please use --gradio flag when running in simulation mode.",
+            "Simulation mode requires Gradio interface. Please use --gradio flag."
         )
         robot.client.disconnect()
         sys.exit(1)
@@ -97,8 +87,9 @@ def run(
         vision_manager=vision_manager,
         head_wobbler=head_wobbler,
     )
+
     current_file_path = os.path.dirname(os.path.abspath(__file__))
-    logger.debug(f"Current file absolute path: {current_file_path}")
+
     chatbot = gr.Chatbot(
         type="messages",
         resizable=True,
@@ -107,19 +98,14 @@ def run(
             os.path.join(current_file_path, "images", "reachymini_avatar.png"),
         ),
     )
-    logger.debug(f"Chatbot avatar images: {chatbot.avatar_images}")
 
-    handler = OpenaiRealtimeHandler(deps, gradio_mode=args.gradio, instance_path=instance_path)
+    handler = StuartRealtimeHandler(
+        deps, gradio_mode=args.gradio, instance_path=instance_path
+    )
 
     stream_manager: gr.Blocks | LocalStream | None = None
 
     if args.gradio:
-        api_key_textbox = gr.Textbox(
-            label="OPENAI API Key",
-            type="password",
-            value=os.getenv("OPENAI_API_KEY") if not get_space() else "",
-        )
-
         from reachy_mini_conversation_app.gradio_personality import PersonalityUI
 
         personality_ui = PersonalityUI()
@@ -131,7 +117,6 @@ def run(
             modality="audio",
             additional_inputs=[
                 chatbot,
-                api_key_textbox,
                 *personality_ui.additional_inputs_ordered(),
             ],
             additional_outputs=[chatbot],
@@ -139,16 +124,16 @@ def run(
             ui_args={"title": "Talk with Reachy Mini"},
         )
         stream_manager = stream.ui
+
         if not settings_app:
             app = FastAPI()
         else:
             app = settings_app
 
         personality_ui.wire_events(handler, stream_manager)
-
         app = gr.mount_gradio_app(app, stream.ui, path="/")
+
     else:
-        # In headless mode, wire settings_app + instance_path to console LocalStream
         stream_manager = LocalStream(
             handler,
             robot,
@@ -156,7 +141,6 @@ def run(
             instance_path=instance_path,
         )
 
-    # Each async service → its own thread/loop
     movement_manager.start()
     head_wobbler.start()
     if camera_worker:
@@ -165,10 +149,8 @@ def run(
         vision_manager.start()
 
     def poll_stop_event() -> None:
-        """Poll the stop event to allow graceful shutdown."""
         if app_stop_event is not None:
             app_stop_event.wait()
-
         logger.info("App stop event detected, shutting down...")
         try:
             stream_manager.close()
@@ -181,7 +163,7 @@ def run(
     try:
         stream_manager.launch()
     except KeyboardInterrupt:
-        logger.info("Keyboard interruption in main thread... closing server.")
+        logger.info("Keyboard interruption — closing server.")
     finally:
         movement_manager.stop()
         head_wobbler.stop()
@@ -190,13 +172,11 @@ def run(
         if vision_manager:
             vision_manager.stop()
 
-        # Ensure media is explicitly closed before disconnecting
         try:
             robot.media.close()
         except Exception as e:
-            logger.debug(f"Error closing media during shutdown: {e}")
+            logger.debug(f"Error closing media: {e}")
 
-        # prevent connection to keep alive some threads
         robot.client.disconnect()
         time.sleep(1)
         logger.info("Shutdown complete.")
@@ -214,9 +194,6 @@ class ReachyMiniConversationApp(ReachyMiniApp):  # type: ignore[misc]
         asyncio.set_event_loop(loop)
 
         args, _ = parse_args()
-
-        # is_wireless = reachy_mini.client.get_status()["wireless_version"]
-        # args.head_tracker = None if is_wireless else "mediapipe"
 
         instance_path = self._get_instance_path().parent
         run(

@@ -14,7 +14,7 @@ from typing import Any, Callable, Optional
 from fastapi import FastAPI
 
 from .config import config
-from .openai_realtime import OpenaiRealtimeHandler
+from .stuart_realtime import StuartRealtimeHandler
 from .headless_personality import (
     DEFAULT_OPTION,
     _sanitize_name,
@@ -28,7 +28,7 @@ from .headless_personality import (
 
 def mount_personality_routes(
     app: FastAPI,
-    handler: OpenaiRealtimeHandler,
+    handler: StuartRealtimeHandler,
     get_loop: Callable[[], asyncio.AbstractEventLoop | None],
     *,
     persist_personality: Callable[[Optional[str]], None] | None = None,
