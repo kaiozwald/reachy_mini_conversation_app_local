@@ -66,6 +66,11 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         self._key_source: Literal["env", "textbox"] = "env"
         self._provided_api_key: str | None = None
 
+        # Initialize attributes that might be skipped in local mode to avoid AttributeError
+        self._chatterbox_client: Any = None
+        self._local_asr_client: Any = None
+        self._edge_tts_client: Any = None
+
         # Debouncing for partial transcripts
         self.partial_transcript_task: asyncio.Task[None] | None = None
         self.partial_transcript_sequence: int = 0  # sequence counter to prevent stale emissions
@@ -184,8 +189,9 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
     @property
     def _is_full_local_mode(self) -> bool:
         """Check if we're in full local mode (no data sent to OpenAI)."""
-        # Always True - fully local operation only
-        return config.FULL_LOCAL_MODE or config.LLM_PROVIDER == "stuart"
+        # If Stuart AI is selected, we MUST use the local processing loop
+        is_stuart = config.LLM_PROVIDER.lower().strip() == "stuart"
+        return config.FULL_LOCAL_MODE or is_stuart
 
     def copy(self) -> "OpenaiRealtimeHandler":
         """Create a copy of the handler."""
