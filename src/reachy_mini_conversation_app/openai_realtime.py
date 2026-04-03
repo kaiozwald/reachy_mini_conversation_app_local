@@ -809,8 +809,12 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
     async def start_up(self) -> None:
         """Start the handler with minimal retries on unexpected websocket closure."""
+        # Diagnostic: Log why we are entering a certain mode
+        is_local = self._is_full_local_mode
+        logger.info(f"Startup check: FULL_LOCAL_MODE={config.FULL_LOCAL_MODE}, LLM_PROVIDER={config.LLM_PROVIDER} -> Is Local? {is_local}")
+
         # In full local mode, skip OpenAI entirely
-        if self._is_full_local_mode:
+        if is_local:
             logger.info("Starting in FULL LOCAL MODE - no OpenAI connection needed")
             await self._run_local_only_session()
             return

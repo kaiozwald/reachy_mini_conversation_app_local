@@ -25,6 +25,7 @@ class Config:
     # =========================================================================
     FULL_LOCAL_MODE = os.getenv("FULL_LOCAL_MODE", "true").lower().strip() in ("true", "1", "yes")  # Hardcoded for fully local operation
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "not-needed")
+    MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-realtime-preview-2024-10-01")
 
     # =========================================================================
     # JETSON OPTIMIZATION
