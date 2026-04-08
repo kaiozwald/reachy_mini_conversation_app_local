@@ -90,7 +90,8 @@ class Tool(abc.ABC):
 def _load_profile_tools() -> None:
     """Load tools based on profile's tools.txt file."""
     # Determine which profile to use
-    profile = config.REACHY_MINI_CUSTOM_PROFILE or "default"
+    profile = "default"
+    # config.REACHY_MINI_CUSTOM_PROFILE or 
     logger.info(f"Loading tools for profile: {profile}")
 
     # Build path to tools.txt

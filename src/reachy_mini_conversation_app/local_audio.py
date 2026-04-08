@@ -435,7 +435,7 @@ class GroqTTS:
     """Groq-hosted Orpheus text-to-speech."""
 
     def __init__(self, api_key: str, model: str = "canopylabs/orpheus-v1-english",
-                 voice: str = "tara", output_sample_rate: int = 24000):
+                 voice: str = "daniel", output_sample_rate: int = 24000):
         from groq import AsyncGroq
         self._client = AsyncGroq(api_key=api_key)
         self._model = model
