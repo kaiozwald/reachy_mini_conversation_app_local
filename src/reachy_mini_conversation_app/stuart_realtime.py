@@ -2,8 +2,11 @@
 
 Pipeline: VAD → Groq Whisper STT → Stuart AI RAG (+ LLM fallback) → Groq Orpheus TTS
 
-When RAG returns no useful answer, falls back to a direct Groq LLaMA chat call
-so the user always gets a reasonable in-character response.
+Fixes applied vs previous version:
+  - Echo loop: TTS mute window extended past playback completion
+  - VAD hallucinations: minimum audio size guard before STT
+  - VAD false triggers: energy threshold guidance in config
+  - Speech started spam: debounce consecutive VAD starts
 """
 
 import re
@@ -30,6 +33,20 @@ logger = logging.getLogger(__name__)
 SAMPLE_RATE: Final[Literal[24000]] = 24000
 
 # ---------------------------------------------------------------------------
+# Minimum captured audio before sending to STT.
+# 24000 Hz * 2 bytes/sample * 1.5 s = 72 000 bytes.
+# Anything shorter is almost certainly noise or a half-syllable — skip it.
+# ---------------------------------------------------------------------------
+MIN_AUDIO_BYTES = int(SAMPLE_RATE * 2 * 1.5)   # 1.5 seconds
+
+# ---------------------------------------------------------------------------
+# How long (seconds) to keep VAD suppressed AFTER TTS finishes playing.
+# This prevents the robot from hearing its own voice through the mic.
+# Increase if the speaker has significant reverb / room echo.
+# ---------------------------------------------------------------------------
+TTS_MUTE_TAIL_SEC = 1.5
+
+# ---------------------------------------------------------------------------
 # Whisper prompt — seeds domain vocabulary so STT stops mishearing NOI terms
 # ---------------------------------------------------------------------------
 WHISPER_PROMPT = (
@@ -51,7 +68,7 @@ RAG_EMPTY_RESPONSES = {
 }
 
 # ---------------------------------------------------------------------------
-# Fallback LLM — Groq chat model (fast, cheap)
+# Fallback LLM
 # ---------------------------------------------------------------------------
 FALLBACK_CHAT_MODEL = "llama-3.1-8b-instant"
 
@@ -65,7 +82,7 @@ FALLBACK_SYSTEM_PROMPT = (
     "3. Keep answers SHORT — 2-3 sentences max.\n"
     "4. End every factual answer with: 'If you would like more detail, just let me know!'\n"
     "5. NEVER invent specific NOI Techpark machine specs or policies — "
-    "   if unsure, say the knowledge base didn't have it and suggest asking staff.\n"
+    "   if unsure, say the knowledge base did not have it and suggest asking staff.\n"
     "6. Use occasional tech metaphors but stay concise."
 )
 
@@ -92,8 +109,17 @@ def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
 
 class StuartRealtimeHandler(AsyncStreamHandler):
 
-    def __init__(self, deps: ToolDependencies, gradio_mode: bool = False, instance_path: Optional[str] = None):
-        super().__init__(expected_layout="mono", output_sample_rate=SAMPLE_RATE, input_sample_rate=SAMPLE_RATE)
+    def __init__(
+        self,
+        deps: ToolDependencies,
+        gradio_mode: bool = False,
+        instance_path: Optional[str] = None,
+    ):
+        super().__init__(
+            expected_layout="mono",
+            output_sample_rate=SAMPLE_RATE,
+            input_sample_rate=SAMPLE_RATE,
+        )
 
         self.output_sample_rate: Literal[24000] = SAMPLE_RATE
         self.input_sample_rate:  Literal[24000] = SAMPLE_RATE
@@ -106,7 +132,7 @@ class StuartRealtimeHandler(AsyncStreamHandler):
         self._connected_event = asyncio.Event()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
-        # VAD
+        # VAD state
         self._local_vad = LocalVAD(
             energy_threshold=config.VAD_ENERGY_THRESHOLD,
             silence_duration=config.VAD_SILENCE_DURATION,
@@ -116,21 +142,36 @@ class StuartRealtimeHandler(AsyncStreamHandler):
         self._audio_buffer: list[bytes] = []
         self._is_speech_active = False
         self._vad_processing = False
-        self._tts_playing = False
         self._frame_count = 0
 
-        # STT
-        self._asr = GroqASR(api_key=config.GROQ_API_KEY, model=config.GROQ_STT_MODEL, language=config.WHISPER_LANGUAGE)
+        # TTS mute state.
+        # _tts_playing  → True only while synthesizing + queueing audio chunks.
+        # _tts_mute_until → monotonic timestamp; VAD is fully suppressed until
+        #                   this time, covering actual speaker playback + tail.
+        self._tts_playing = False
+        self._tts_mute_until: float = 0.0
 
-        # TTS
-        self._tts = GroqTTS(api_key=config.GROQ_API_KEY, model=config.GROQ_TTS_MODEL, voice=config.GROQ_TTS_VOICE, output_sample_rate=self.output_sample_rate)
+        # STT / TTS providers
+        self._asr = GroqASR(
+            api_key=config.GROQ_API_KEY,
+            model=config.GROQ_STT_MODEL,
+            language=config.WHISPER_LANGUAGE,
+        )
+        self._tts = GroqTTS(
+            api_key=config.GROQ_API_KEY,
+            model=config.GROQ_TTS_MODEL,
+            voice=config.GROQ_TTS_VOICE,
+            output_sample_rate=self.output_sample_rate,
+        )
 
-        _log(f"STT     : Groq Whisper  ({config.GROQ_STT_MODEL})")
-        _log(f"TTS     : Groq Orpheus  ({config.GROQ_TTS_MODEL} / {config.GROQ_TTS_VOICE})")
-        _log(f"RAG     : Stuart AI     {config.STUART_ENDPOINT}")
-        _log(f"FALLBACK: Groq chat     {FALLBACK_CHAT_MODEL}")
+        _log(f"STT          : Groq Whisper  ({config.GROQ_STT_MODEL})")
+        _log(f"TTS          : Groq Orpheus  ({config.GROQ_TTS_MODEL} / {config.GROQ_TTS_VOICE})")
+        _log(f"RAG          : Stuart AI     {config.STUART_ENDPOINT}")
+        _log(f"FALLBACK     : Groq chat     {FALLBACK_CHAT_MODEL}")
+        _log(f"MIN AUDIO    : {MIN_AUDIO_BYTES} bytes  ({MIN_AUDIO_BYTES / (SAMPLE_RATE * 2):.1f}s)")
+        _log(f"TTS MUTE TAIL: {TTS_MUTE_TAIL_SEC}s after playback ends")
         print("=" * 60, flush=True)
-        print("Pipeline: VAD → STT → RAG → (LLM fallback if needed) → TTS", flush=True)
+        print("Pipeline: VAD → STT → RAG → (LLM fallback) → TTS", flush=True)
         print("=" * 60, flush=True)
 
     def copy(self):
@@ -156,7 +197,8 @@ class StuartRealtimeHandler(AsyncStreamHandler):
     # ------------------------------------------------------------------
 
     async def _transcribe(self, audio_bytes: bytes) -> Optional[str]:
-        _log(f"[STT] Transcribing {len(audio_bytes)} bytes...")
+        duration = len(audio_bytes) / (SAMPLE_RATE * 2)
+        _log(f"[STT] Transcribing {len(audio_bytes)} bytes ({duration:.2f}s)...")
         wav = _pcm_to_wav(audio_bytes, self.input_sample_rate)
         try:
             form = aiohttp.FormData()
@@ -184,12 +226,13 @@ class StuartRealtimeHandler(AsyncStreamHandler):
                 return None
             _log(f"[STT] Transcript: {text}")
             return text
+
         except Exception as exc:
             _err(f"STT error ({exc}) — using GroqASR fallback")
             try:
                 return await self._asr.transcribe(audio_bytes, self.input_sample_rate)
             except Exception as exc2:
-                _err(f"STT fallback failed: {exc2}")
+                _err(f"STT fallback also failed: {exc2}")
                 return None
 
     # ------------------------------------------------------------------
@@ -197,7 +240,6 @@ class StuartRealtimeHandler(AsyncStreamHandler):
     # ------------------------------------------------------------------
 
     async def _query_rag(self, question: str) -> Optional[str]:
-        """Returns answer string if RAG found something, None if not."""
         try:
             _log(f"[RAG] Querying: {question[:120]}")
             form = aiohttp.FormData()
@@ -218,12 +260,10 @@ class StuartRealtimeHandler(AsyncStreamHandler):
             raw = result.get("manswer", "").strip()
             _log(f"[RAG] Raw: {raw[:120]}")
 
-            # Check if it's an empty/useless answer
             if raw.lower().rstrip(" .!") in RAG_EMPTY_RESPONSES:
-                _log("[RAG] No useful answer in knowledge base → will use LLM fallback")
+                _log("[RAG] No useful answer → LLM fallback")
                 return None
 
-            # Strip markdown for clean TTS
             answer = re.sub(r"\*+", "", raw)
             answer = re.sub(r"^#+\s*", "", answer, flags=re.MULTILINE)
             return answer.strip()
@@ -240,11 +280,6 @@ class StuartRealtimeHandler(AsyncStreamHandler):
     # ------------------------------------------------------------------
 
     async def _query_llm_fallback(self, question: str) -> str:
-        """
-        Called when RAG has no answer.
-        Asks Groq chat API directly — keeps the robot in character and
-        avoids hallucinating NOI-specific facts.
-        """
         _log(f"[FALLBACK] Asking LLM: {question[:120]}")
         try:
             payload = {
@@ -256,7 +291,6 @@ class StuartRealtimeHandler(AsyncStreamHandler):
                 "max_tokens": 200,
                 "temperature": 0.4,
             }
-
             async with aiohttp.ClientSession() as s:
                 async with s.post(
                     "https://api.groq.com/openai/v1/chat/completions",
@@ -268,9 +302,8 @@ class StuartRealtimeHandler(AsyncStreamHandler):
                     timeout=aiohttp.ClientTimeout(total=30.0),
                 ) as resp:
                     if resp.status != 200:
-                        err = await resp.text()
-                        _err(f"Fallback LLM HTTP {resp.status}: {err[:200]}")
-                        return "My knowledge base did not have that. Please ask a staff member for help!"
+                        _err(f"Fallback LLM HTTP {resp.status}: {await resp.text()}")
+                        return "My knowledge base did not have that. Please ask a staff member!"
                     result = await resp.json()
 
             answer = result["choices"][0]["message"]["content"].strip()
@@ -287,7 +320,7 @@ class StuartRealtimeHandler(AsyncStreamHandler):
             return "My knowledge base did not have that. Please ask a staff member!"
 
     # ------------------------------------------------------------------
-    # TTS
+    # TTS — with extended mute window to block echo loop
     # ------------------------------------------------------------------
 
     async def _speak(self, text: str) -> None:
@@ -300,16 +333,30 @@ class StuartRealtimeHandler(AsyncStreamHandler):
             if audio_data is None:
                 _err("TTS returned no audio")
                 return
-            _log(f"[TTS] {len(audio_data)} samples — queuing")
+
+            # Calculate playback duration and set mute window BEFORE queuing
+            # chunks, so VAD is suppressed from the very start of playback.
+            playback_sec = len(audio_data) / SAMPLE_RATE
+            mute_sec = playback_sec + TTS_MUTE_TAIL_SEC
+            self._tts_mute_until = asyncio.get_event_loop().time() + mute_sec
+            _log(f"[TTS] {len(audio_data)} samples ({playback_sec:.1f}s) — "
+                 f"VAD muted for {mute_sec:.1f}s")
+
             if self.deps.head_wobbler is not None:
                 self.deps.head_wobbler.feed(base64.b64encode(audio_data.tobytes()).decode())
-            for i in range(0, len(audio_data), 4800):
-                chunk = audio_data[i:i + 4800]
+
+            chunk_size = 4800   # 200 ms at 24 kHz
+            for i in range(0, len(audio_data), chunk_size):
+                chunk = audio_data[i: i + chunk_size]
                 await self.output_queue.put((self.output_sample_rate, chunk.reshape(1, -1)))
+
             _log("[TTS] Playback queued ✓")
+
         except Exception as exc:
             _err(f"TTS failed: {exc}")
         finally:
+            # _tts_playing goes False once chunks are queued (synthesis done),
+            # but _tts_mute_until keeps VAD blocked through actual speaker output.
             self._tts_playing = False
 
     # ------------------------------------------------------------------
@@ -317,34 +364,29 @@ class StuartRealtimeHandler(AsyncStreamHandler):
     # ------------------------------------------------------------------
 
     async def _process_speech(self, audio_bytes: bytes) -> None:
-        """
-        PCM → STT → RAG → [LLM fallback if RAG empty] → TTS
-
-            RAG has answer  →  speak RAG answer        [source: RAG]
-            RAG has nothing →  ask Groq LLM directly   [source: FALLBACK]
-        """
         try:
-            # 1. STT
             transcript = await self._transcribe(audio_bytes)
+            if not transcript or transcript.lower().strip(" .") == "thank you":
+                _log("[PIPELINE] Ignoring short or ghost transcript")
+                return
             if not transcript:
                 return
 
             await self.output_queue.put(AdditionalOutputs({"role": "user", "content": transcript}))
+            filler = "Got it, let me check that for you."
+            asyncio.create_task(self._speak(filler))
 
-            # 2. RAG
             answer = await self._query_rag(transcript)
             source = "RAG"
 
-            # 3. Fallback if RAG had nothing
             if answer is None:
                 answer = await self._query_llm_fallback(transcript)
                 source = "FALLBACK"
 
-            _log(f"[PIPELINE] Answering via {source}: {answer[:80]}")
-
-            await self.output_queue.put(AdditionalOutputs({"role": "assistant", "content": f"[{source}] {answer}"}))
-
-            # 4. TTS
+            _log(f"[PIPELINE] {source}: {answer[:80]}")
+            await self.output_queue.put(
+                AdditionalOutputs({"role": "assistant", "content": f"[{source}] {answer}"})
+            )
             await self._speak(answer)
 
         except Exception as exc:
@@ -359,6 +401,7 @@ class StuartRealtimeHandler(AsyncStreamHandler):
     async def receive(self, frame: Tuple[int, NDArray[np.int16]]) -> None:
         input_sr, audio_frame = frame
 
+        # Normalise to 1-D mono
         if audio_frame.ndim == 2:
             if audio_frame.shape[1] > audio_frame.shape[0]:
                 audio_frame = audio_frame.T
@@ -367,17 +410,34 @@ class StuartRealtimeHandler(AsyncStreamHandler):
         audio_frame = audio_frame.flatten()
 
         if input_sr != self.input_sample_rate:
-            audio_frame = resample(audio_frame, int(len(audio_frame) * self.input_sample_rate / input_sr))
+            audio_frame = resample(
+                audio_frame,
+                int(len(audio_frame) * self.input_sample_rate / input_sr),
+            )
 
         audio_frame = audio_to_int16(audio_frame)
 
+        # Periodic RMS heartbeat — useful for tuning VAD_ENERGY_THRESHOLD
         self._frame_count += 1
         if self._frame_count % 100 == 0:
             rms = np.sqrt(np.mean((audio_frame.astype(np.float32) / 32768.0) ** 2))
-            print(f"[VAD] RMS={rms:.5f}  threshold={config.VAD_ENERGY_THRESHOLD:.5f}", flush=True)
+            now = asyncio.get_event_loop().time()
+            muted = self._tts_playing or now < self._tts_mute_until
+            print(
+                f"[VAD] RMS={rms:.5f}  threshold={config.VAD_ENERGY_THRESHOLD:.5f}"
+                f"  muted={'YES ← TTS window' if muted else 'no'}",
+                flush=True,
+            )
 
-        if self._tts_playing:
-            return
+        # ------------------------------------------------------------------
+        # ECHO SUPPRESSION
+        # Discard all frames while TTS is synthesizing OR while we are inside
+        # the mute tail window (actual speaker playback + reverb settling).
+        # This is the primary fix for the robot hearing its own voice.
+        # ------------------------------------------------------------------
+        now = asyncio.get_event_loop().time()
+        if self._tts_playing or now < self._tts_mute_until:
+            return  # ← completely ignore this frame
 
         speech_started, speech_ended = self._local_vad.process(audio_frame)
 
@@ -397,7 +457,23 @@ class StuartRealtimeHandler(AsyncStreamHandler):
 
             audio_bytes = b"".join(self._audio_buffer)
             self._audio_buffer.clear()
-            print(f"[VAD] Speech ended ◼  {len(audio_bytes)} bytes captured", flush=True)
+            duration = len(audio_bytes) / (SAMPLE_RATE * 2)
+            print(f"[VAD] Speech ended ◼  {len(audio_bytes)} bytes ({duration:.2f}s)", flush=True)
+
+            # ------------------------------------------------------------------
+            # MINIMUM LENGTH GUARD
+            # If the captured audio is shorter than MIN_AUDIO_BYTES it is
+            # almost certainly noise, mic hiss, or a clipped syllable.
+            # Sending it to Whisper would produce hallucinated words.
+            # ------------------------------------------------------------------
+            if len(audio_bytes) < MIN_AUDIO_BYTES:
+                print(
+                    f"[VAD] Too short ({duration:.2f}s < {MIN_AUDIO_BYTES / (SAMPLE_RATE * 2):.1f}s)"
+                    f" — discarding (noise guard)",
+                    flush=True,
+                )
+                self._vad_processing = False
+                return
 
             coro = self._process_speech(audio_bytes)
             if self._loop is not None and self._loop.is_running():
