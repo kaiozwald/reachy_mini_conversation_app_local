@@ -1,4 +1,4 @@
-**# Reachy Mini Conversation App
+# Reachy Mini Conversation App
 
 **Fully local conversational AI for Reachy Mini robot** - combining lightweight speech recognition, text-to-speech, and local LLM with choreographed motion libraries.
 
