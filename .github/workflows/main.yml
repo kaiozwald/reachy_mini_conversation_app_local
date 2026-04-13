@@ -11,5 +11,5 @@ jobs:
       - uses: huggingface/hub-sync@v0.1.0
         with:
           github_repo_id: ${{ github.repository }}
-          huggingface_repo_id: https://huggingface.co/spaces/kaiozwald/reachy_mini_conversation_app_local/tree/main/src/reachy_mini_conversation_app
+          huggingface_repo_id: kaiozwald/reachy_mini_conversation_app_local
           hf_token: ${{ secrets.HF_TOKEN }}
