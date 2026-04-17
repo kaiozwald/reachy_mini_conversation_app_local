@@ -15,6 +15,9 @@ Key behaviours that match the OpenAI realtime experience:
   - Concurrent processing: STT + RAG/LLM run while silence is still being
     detected, so the robot's first TTS chunk is queued as soon as the LLM
     returns — not after an extra silence timeout.
+  - Acknowledgment phrases: immediately after speech ends, a short "thinking
+    aloud" phrase is spoken concurrently with STT+RAG processing, so the
+    user hears a response while the robot searches for the answer.
 """
 
 import re
@@ -23,6 +26,7 @@ import wave
 import base64
 import asyncio
 import logging
+import random
 from typing import Any, Final, Tuple, Literal, Optional
 
 import aiohttp
@@ -65,6 +69,23 @@ BARGE_IN_COOLDOWN_SEC = 0.6
 
 # TTS chunk size streamed to the speaker queue.  200 ms at 24 kHz.
 TTS_CHUNK_SAMPLES = 4800
+
+# ── Acknowledgment phrases ────────────────────────────────────────────────────
+# Spoken immediately after the user finishes talking, while STT + RAG are
+# running in the background. Keeps the interaction feeling responsive.
+# Add/remove phrases freely — they are chosen at random each turn.
+ACK_PHRASES = [
+    "Got it, let me look that up for you!",
+    "Sure, one moment while I search for that.",
+    "On it! Give me just a second.",
+    "Great question — let me find out.",
+    "Alright, searching for that now!",
+    "Sure thing, I'm on it!",
+    "Let me check that for you right away.",
+    "OK, looking into that now.",
+    "Sure! I'll have an answer for you in just a moment.",
+    "Interesting! Let me dig into that.",
+]
 
 # ── Whisper domain prompt ─────────────────────────────────────────────────────
 WHISPER_PROMPT = (
@@ -169,6 +190,11 @@ class StuartRealtimeHandler(AsyncStreamHandler):
         self._tts_start_time: float = 0.0
         self._tts_mute_until: float = 0.0
 
+        # ── Acknowledgment task state ─────────────────────────────────────
+        # _ack_task: asyncio.Task wrapping _speak_ack(); cancelled as soon as
+        # the real answer TTS is ready to start, so they never overlap.
+        self._ack_task: Optional[asyncio.Task] = None
+
         # Consecutive above-threshold frames while TTS is playing
         self._barge_in_frame_counter: int = 0
 
@@ -206,8 +232,9 @@ class StuartRealtimeHandler(AsyncStreamHandler):
         _log(f"MIN AUDIO    : {MIN_AUDIO_BYTES / (SAMPLE_RATE * 2):.1f}s")
         _log(f"ECHO GUARD   : {ECHO_GUARD_SEC}s   BARGE-IN: ×{BARGE_IN_MULTIPLIER} threshold "
              f"({BARGE_IN_FRAMES_REQUIRED} frames, {BARGE_IN_COOLDOWN_SEC}s cooldown)")
+        _log(f"ACK PHRASES  : {len(ACK_PHRASES)} phrases loaded")
         print("=" * 60, flush=True)
-        print("Pipeline: VAD → STT → RAG → LLM fallback → TTS  [barge-in]", flush=True)
+        print("Pipeline: VAD → ACK (concurrent) → STT → RAG → LLM fallback → TTS  [barge-in]", flush=True)
         print("=" * 60, flush=True)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -224,6 +251,7 @@ class StuartRealtimeHandler(AsyncStreamHandler):
 
     async def shutdown(self) -> None:
         self._shutdown_requested = True
+        await self._cancel_ack(reason="shutdown")
         await self._cancel_tts(reason="shutdown")
         while not self.output_queue.empty():
             try:
@@ -242,10 +270,25 @@ class StuartRealtimeHandler(AsyncStreamHandler):
             _err(f"apply_personality failed: {exc}")
             return f"Failed to apply personality: {exc}"
 
+    # ── Acknowledgment cancel ─────────────────────────────────────────────────
+
+    async def _cancel_ack(self, reason: str = "answer-ready") -> None:
+        """Cancel the in-flight acknowledgment phrase, if any."""
+        if self._ack_task and not self._ack_task.done():
+            self._ack_task.cancel()
+            try:
+                await self._ack_task
+            except asyncio.CancelledError:
+                pass
+        self._ack_task = None
+
     # ── TTS cancel (barge-in / shutdown) ─────────────────────────────────────
 
     async def _cancel_tts(self, reason: str = "barge-in") -> None:
-        """Cancel in-flight TTS and drain the audio queue instantly."""
+        """Cancel in-flight TTS (ack or answer) and drain the audio queue instantly."""
+        # Cancel acknowledgment too — it shares the same output queue
+        await self._cancel_ack(reason=reason)
+
         if self._tts_task and not self._tts_task.done():
             self._tts_task.cancel()
             try:
@@ -441,11 +484,55 @@ class StuartRealtimeHandler(AsyncStreamHandler):
         finally:
             self._tts_playing = False
 
+    # ── Acknowledgment TTS (lightweight, no head-wobbler, no echo guard) ──────
+
+    async def _speak_ack(self, text: str) -> None:
+        """
+        Speak a short acknowledgment phrase while STT + RAG run in the
+        background.  Differences from _speak():
+
+        - Does NOT set _tts_playing to True (keeps barge-in threshold normal
+          so the user can still interrupt naturally).
+        - Does NOT update _tts_mute_until (echo guard handled by the real
+          answer TTS that follows).
+        - Does NOT feed the head-wobbler (the answer TTS will do that).
+        - Cancelled cleanly by _cancel_ack() the moment the answer is ready.
+        """
+        if not text:
+            return
+        _log(f"[ACK] Synthesizing acknowledgment: '{text}'")
+        try:
+            audio_data = await self._tts.synthesize(text)
+            if audio_data is None:
+                _err("[ACK] Synthesis returned None — skipping")
+                return
+
+            _log(f"[ACK] {len(audio_data)} samples — streaming to queue")
+            for i in range(0, len(audio_data), TTS_CHUNK_SAMPLES):
+                chunk = audio_data[i: i + TTS_CHUNK_SAMPLES]
+                await self.output_queue.put(
+                    (self.output_sample_rate, chunk.reshape(1, -1))
+                )
+                await asyncio.sleep(0)   # ← cancellation point
+
+            _log("[ACK] Done ✓")
+
+        except asyncio.CancelledError:
+            _log("[ACK] Cancelled (answer is ready) ✓")
+            raise
+        except Exception as exc:
+            _err(f"[ACK] TTS failed: {exc}")
+
     # ── Full speech pipeline ──────────────────────────────────────────────────
 
     async def _process_speech(self, audio_bytes: bytes) -> None:
         """
-        PCM audio → STT → RAG → (LLM fallback) → TTS
+        PCM audio → (ACK concurrently) → STT → RAG → (LLM fallback) → TTS
+
+        The acknowledgment phrase starts immediately so the user hears
+        something while STT + RAG are running.  It is cancelled the instant
+        the answer TTS is about to start, ensuring there is no overlap and
+        no awkward silence between ack and answer.
 
         Mirrors the OpenAI event flow:
           speech_started  → deps.movement_manager.set_listening(True)   [in receive()]
@@ -453,9 +540,15 @@ class StuartRealtimeHandler(AsyncStreamHandler):
           response done   → push assistant message + start TTS
         """
         try:
-            # 1. STT
+            # ── 0. Kick off acknowledgment phrase concurrently ────────────
+            ack_phrase = random.choice(ACK_PHRASES)
+            self._ack_task = asyncio.create_task(self._speak_ack(ack_phrase))
+
+            # ── 1. STT (runs while ack is playing) ───────────────────────
             transcript = await self._transcribe(audio_bytes)
             if not transcript:
+                # Cancel ack if STT produced nothing — nothing to answer
+                await self._cancel_ack(reason="empty-transcript")
                 return
 
             # Mirrors: conversation.item.input_audio_transcription.completed
@@ -463,7 +556,7 @@ class StuartRealtimeHandler(AsyncStreamHandler):
                 AdditionalOutputs({"role": "user", "content": transcript})
             )
 
-            # 2. RAG → LLM fallback
+            # ── 2. RAG → LLM fallback ────────────────────────────────────
             answer = await self._query_rag(transcript)
             source = "RAG"
             if answer is None:
@@ -472,12 +565,29 @@ class StuartRealtimeHandler(AsyncStreamHandler):
 
             _log(f"[PIPELINE] [{source}] {answer[:80]}")
 
+            # ── 3. Cancel ack, then drain its leftover queued audio ───────
+            # We cancel the ack task first, then purge any audio it already
+            # enqueued that hasn't played yet — this prevents overlap between
+            # the tail of the ack phrase and the start of the real answer.
+            await self._cancel_ack(reason="answer-ready")
+            # Drain any pending audio frames the ack pushed (keep UI messages)
+            kept: list = []
+            while not self.output_queue.empty():
+                try:
+                    item = self.output_queue.get_nowait()
+                    if isinstance(item, AdditionalOutputs):
+                        kept.append(item)
+                except asyncio.QueueEmpty:
+                    break
+            for item in kept:
+                await self.output_queue.put(item)
+
             # Mirrors: response.output_audio_transcript.done
             await self.output_queue.put(
                 AdditionalOutputs({"role": "assistant", "content": f"[{source}] {answer}"})
             )
 
-            # 3. TTS — wrapped as cancellable Task (mirrors response.output_audio.delta stream)
+            # ── 4. TTS — wrapped as cancellable Task ──────────────────────
             self._tts_task = asyncio.create_task(self._speak(answer))
             await self._tts_task
 
@@ -519,6 +629,7 @@ class StuartRealtimeHandler(AsyncStreamHandler):
             print(
                 f"[VAD] RMS={rms:.5f}  thr={config.VAD_ENERGY_THRESHOLD:.5f}"
                 f"  tts={'ON' if self._tts_playing else 'off'}"
+                f"  ack={'ON' if (self._ack_task and not self._ack_task.done()) else 'off'}"
                 f"  echo={'YES' if now < self._tts_mute_until else 'no'}",
                 flush=True,
             )

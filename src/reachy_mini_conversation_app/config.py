@@ -64,6 +64,7 @@ class Config:
     # VAD_MIN_SPEECH_DURATION
     #   Minimum seconds of detected speech before VAD fires speech_started.
     #   0.4 s filters out click/pop false starts.
+
     VAD_ENERGY_THRESHOLD    = float(os.getenv("VAD_ENERGY_THRESHOLD",    "0.05"))
     VAD_SILENCE_DURATION    = float(os.getenv("VAD_SILENCE_DURATION",    "1.2"))
     VAD_MIN_SPEECH_DURATION = float(os.getenv("VAD_MIN_SPEECH_DURATION", "0.4"))
@@ -82,9 +83,7 @@ class Config:
                 f"silence={VAD_SILENCE_DURATION}s  min_speech={VAD_MIN_SPEECH_DURATION}s")
     logger.info("=" * 60)
 
-
 config = Config()
-
 
 def set_custom_profile(profile: str | None) -> None:
     """Update the active personality profile at runtime."""
